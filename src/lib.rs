@@ -76,7 +76,7 @@ impl<T: Clone + Sync> Stream for BusReader<T> {
                 Ok(Async::Ready(Some(value)))
             }
             Err(err) => match err {
-                TryRecvError::Disconnected => Err(RecvError {}),
+                TryRecvError::Disconnected => Ok(Async::Ready(None)),
                 TryRecvError::Empty => {
                     self.read_task.register();
                     Ok(Async::NotReady)
