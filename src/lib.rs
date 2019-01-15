@@ -86,6 +86,20 @@ impl<T: Clone + Sync> Bus<T> {
             .push(Arc::downgrade(&Arc::clone(&read_task)));
         BusReader::new(inner, read_task, Arc::clone(&self.write_task))
     }
+
+    /// Wake all tasks for our readers, and silently drop any
+    /// read task handles for which the reader has been dropped.
+    fn notify_readers(&mut self) {
+        let mut i = 0;
+        while i < self.read_tasks.len() {
+            if let Some(task) = self.read_tasks[i].upgrade() {
+                task.notify();
+                i += 1;
+            } else {
+                self.read_tasks.remove(i);
+            }
+        }
+    }
 }
 
 impl<T: Clone + Sync> Sink for Bus<T> {
@@ -101,6 +115,7 @@ impl<T: Clone + Sync> Sink for Bus<T> {
         self.write_task.register();
         let result = match self.inner.try_broadcast(item) {
             Ok(_) => {
+                self.notify_readers();
                 for weak_task in self.read_tasks.iter() {
                     if let Some(task) = weak_task.upgrade() {
                         task.notify();
@@ -248,6 +263,15 @@ mod tests {
             let mut receiver1 = receiver1.skip(1).peekable();
             assert_eq!(receiver1.peek(), Ok(Async::NotReady));
             ::std::mem::drop(receiver2);
+            bus.send(()).unwrap();
+            bus.flush().unwrap();
+
+            // drop the remaining receiver which should result in
+            // in all broadcasts being effectively a noop and
+            // therefore should not cause the buffer to block
+            ::std::mem::drop(receiver1);
+            bus.send(()).unwrap();
+            bus.flush().unwrap();
             bus.send(()).unwrap();
             bus.flush().unwrap();
 
