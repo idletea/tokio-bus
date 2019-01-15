@@ -48,6 +48,9 @@ use futures::AsyncSink;
 
 use bus;
 
+/// A bus which buffers messages for all of its readers
+/// to eventually read. Allows the dynamic addition and
+/// removal of readers.
 pub struct Bus<T: Clone + Sync> {
     inner: bus::Bus<T>,
     /// Tasks indicating reads are likely to now succeed
@@ -57,6 +60,11 @@ pub struct Bus<T: Clone + Sync> {
 }
 
 impl<T: Clone + Sync> Bus<T> {
+    /// Create a new `Bus` that will buffer at most `len` messages.
+    ///
+    /// Note that until all readers have read a given message
+    /// (or the reader has been dropped) it is kept in the
+    /// buffer and counts against the buffer size. 
     pub fn new(len: usize) -> Self {
         let inner = bus::Bus::new(len);
         let read_tasks = Vec::new();
@@ -68,6 +76,9 @@ impl<T: Clone + Sync> Bus<T> {
         }
     }
 
+    /// Create a new `BusReader` instance which can be used to
+    /// read messages from the `Bus` that were sent *after* the
+    /// creation of this `BusReader`.
     pub fn add_rx(&mut self) -> BusReader<T> {
         let inner = self.inner.add_rx();
         let read_task = Arc::new(AtomicTask::new());
@@ -82,7 +93,7 @@ impl<T: Clone + Sync> Sink for Bus<T> {
     type SinkError = ();
 
     /// Either successfully buffer the item on the internal
-    /// Bus' buffer, or indicate the Sink is full
+    /// Bus' buffer, or indicate the Sink is full.
     fn start_send(
         &mut self,
         item: Self::SinkItem,
@@ -110,6 +121,13 @@ impl<T: Clone + Sync> Sink for Bus<T> {
     }
 }
 
+/// The `BusReader` should not be manually crated,
+/// but rather crated by calling `add_rx()` on a `Bus`.
+///
+/// A `Bus` and `BusReader` are both safe to drop at any time,
+/// any messages not read by the `BusReader` will not be lost
+/// if the `Bus` is dropped first, and if the `BusReader` is
+/// dropped first it will not block the `Bus`'s buffer.
 pub struct BusReader<T: Clone + Sync> {
     read_task: Arc<AtomicTask>,
     write_task: Arc<AtomicTask>,
@@ -117,6 +135,11 @@ pub struct BusReader<T: Clone + Sync> {
 }
 
 impl<T: Clone + Sync> BusReader<T> {
+    /// Create a new `BusReader` from a `bus::BusReader`, a
+    /// handle to a task to register for writes to the `Bus`
+    /// and a handle to a task to notify when a read has
+    /// potentially caused buffer space in the `Bus` to
+    /// become available.
     pub fn new(
         inner: bus::BusReader<T>,
         read_task: Arc<AtomicTask>,
