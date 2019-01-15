@@ -4,6 +4,7 @@ use std::sync::{Arc, Weak};
 use tokio::prelude::task::AtomicTask;
 
 use futures::prelude::*;
+use futures::AsyncSink;
 
 use bus;
 
@@ -34,14 +35,38 @@ impl<T: Clone + Sync> Bus<T> {
             .push(Arc::downgrade(&Arc::clone(&read_task)));
         BusReader::new(inner, read_task, Arc::clone(&self.write_task))
     }
+}
 
-    pub fn broadcast(&mut self, val: T) {
-        self.inner.broadcast(val);
-        for weak_task in self.read_tasks.iter() {
-            if let Some(task) = weak_task.upgrade() {
-                task.notify();
+impl<T: Clone + Sync> Sink for Bus<T> {
+    type SinkItem = T;
+    type SinkError = ();
+
+    /// Either successfully buffer the item on the internal
+    /// Bus' buffer, or indicate the Sink is full
+    fn start_send(
+        &mut self,
+        item: Self::SinkItem,
+    ) -> futures::StartSend<Self::SinkItem, Self::SinkError> {
+        self.write_task.register();
+        let result = match self.inner.try_broadcast(item) {
+            Ok(_) => {
+                for weak_task in self.read_tasks.iter() {
+                    if let Some(task) = weak_task.upgrade() {
+                        task.notify();
+                    }
+                }
+                Ok(AsyncSink::Ready)
             }
-        }
+            Err(item) => Ok(AsyncSink::NotReady(item)),
+        };
+
+        result
+    }
+
+    /// This sink uses the inner Bus' buffer and therefore a
+    /// success with `start_send` has already completed the send
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        Ok(Async::Ready(()))
     }
 }
 
@@ -70,6 +95,7 @@ impl<T: Clone + Sync> Stream for BusReader<T> {
     type Error = RecvError;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        self.read_task.register();
         match self.inner.try_recv() {
             Ok(value) => {
                 self.write_task.notify();
@@ -77,10 +103,7 @@ impl<T: Clone + Sync> Stream for BusReader<T> {
             }
             Err(err) => match err {
                 TryRecvError::Disconnected => Ok(Async::Ready(None)),
-                TryRecvError::Empty => {
-                    self.read_task.register();
-                    Ok(Async::NotReady)
-                }
+                TryRecvError::Empty => Ok(Async::NotReady),
             },
         }
     }
@@ -90,6 +113,7 @@ impl<T: Clone + Sync> Stream for BusReader<T> {
 mod tests {
     use super::*;
     use futures::future;
+    use futures::stream::iter_ok;
 
     #[test]
     /// test the underlying bus has been properly
@@ -100,6 +124,8 @@ mod tests {
 
         let mut receiver1 = bus.add_rx().peekable();
         let mut receiver2 = bus.add_rx().peekable();
+
+        let mut bus = bus.wait();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         rt.block_on_all(future::lazy(move || {
@@ -108,7 +134,8 @@ mod tests {
             assert_eq!(receiver2.peek(), Ok(Async::NotReady));
 
             // receivers should both receive one message once
-            bus.broadcast(());
+            bus.send(()).unwrap();
+            bus.flush().unwrap();
             assert_eq!(receiver1.peek(), Ok(Async::Ready(Some(&()))));
             assert_eq!(receiver2.peek(), Ok(Async::Ready(Some(&()))));
             let mut receiver1 = receiver1.skip(1).peekable();
@@ -118,14 +145,15 @@ mod tests {
 
             // receivers should be able to receive after the
             // bus drops, and get the recv error afterward
-            bus.broadcast(());
+            bus.send(()).unwrap();
+            bus.flush().unwrap();
             ::std::mem::drop(bus);
             assert_eq!(receiver1.peek(), Ok(Async::Ready(Some(&()))));
             assert_eq!(receiver2.peek(), Ok(Async::Ready(Some(&()))));
             let mut receiver1 = receiver1.skip(1).peekable();
             let mut receiver2 = receiver2.skip(1).peekable();
-            assert_eq!(receiver1.peek(), Err(RecvError {}));
-            assert_eq!(receiver2.peek(), Err(RecvError {}));
+            assert_eq!(receiver1.peek(), Ok(Async::Ready(None)));
+            assert_eq!(receiver2.peek(), Ok(Async::Ready(None)));
 
             future::ok::<(), ()>(())
         }))
@@ -139,6 +167,8 @@ mod tests {
 
         let receiver1 = bus.add_rx().peekable();
         let receiver2 = bus.add_rx().peekable();
+
+        let mut bus = bus.wait();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         rt.block_on_all(future::lazy(move || {
@@ -150,38 +180,39 @@ mod tests {
             //       will only lazily skip the next element, therefore
             //       it does not actually advance the internal reader's
             //       state until the `peek()` call is made.
-            bus.broadcast(());
+            bus.send(()).unwrap();
+            bus.flush().unwrap();
             let mut receiver1 = receiver1.skip(1).peekable();
             assert_eq!(receiver1.peek(), Ok(Async::NotReady));
             ::std::mem::drop(receiver2);
-            bus.broadcast(());
+            bus.send(()).unwrap();
+            bus.flush().unwrap();
 
             future::ok::<(), ()>(())
         }))
         .unwrap();
     }
 
-    // #[test]
-    // /// Test task wakeups occur as expected - ie: that a receive can wake the
-    // /// bus waiting for buffer space to send, and the bus sending can wake the
-    // /// receivers waiting for more values to read.
-    // fn task_wakeup() {
-    //     let mut bus: Bus<()> = Bus::new(1);
+    #[test]
+    /// Test task wakeups occur as expected - ie: that a receive can wake the
+    /// bus waiting for buffer space to send, and the bus sending can wake the
+    /// receivers waiting for more values to read.
+    fn task_wakeup() {
+        let mut bus: Bus<i32> = Bus::new(1);
 
-    //     let receiver1 = bus.add_rx().peekable();
-    //     let receiver2 = bus.add_rx().peekable();
-    //     let rt = tokio::runtime::Runtime::new().unwrap();
+        let receiver1 = bus.add_rx().peekable();
+        let receiver2 = bus.add_rx().peekable();
+        let mut rt = tokio::runtime::Runtime::new().unwrap();
 
-    //     // With a single-item buffer and multiple items to
-    //     // move through to complete all futures it's impossible
-    //     // for the futures to complete unless the receivers
-    //     // correctly wake up the bus to check for buffer space,
-    //     // and the bus correctly wakes up the receivers to
-    //     // consume from the buffer and make more space availabile
-    //     rt.spawn(receiver1.take(4).collect());
-    //     rt.block_on_all(
-    //         future::ok::<(), ()>(())
-    //     }));
-    //     .unwrap();
-    // }
+        // With a single-item buffer and multiple items to
+        // move through to complete all futures it's impossible
+        // for the futures to complete unless the receivers
+        // correctly wake up the bus to check for buffer space,
+        // and the bus correctly wakes up the receivers to
+        // consume from the buffer and make more space availabile
+        rt.spawn(receiver1.take(6).collect().map(|_| {}).map_err(|_| {}));
+        rt.spawn(receiver2.take(6).collect().map(|_| {}).map_err(|_| {}));
+        rt.block_on_all(bus.send_all(iter_ok::<_, ()>(vec![10, 20, 30, 40, 50, 60])))
+            .unwrap();
+    }
 }
