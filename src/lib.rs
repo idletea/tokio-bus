@@ -87,8 +87,33 @@ impl<T: Clone + Sync> Bus<T> {
         BusReader::new(inner, read_task, Arc::clone(&self.write_task))
     }
 
+    /// Attempt to broadcast a message synchronously, failing and
+    /// returning the item set to be broadcast if the broadcast
+    /// cannot be completed without blocking.
+    ///
+    /// It can be inconvient in some cases to have to deal with
+    /// the `Sink` trait as it necessarily needs to take and pass
+    /// back ownership. The `Bus` does not need any blocking I/O
+    /// except when the buffer is full, which in some systems is
+    /// an easy situation to avoid.
+    ///
+    /// This method will allow for synchronous sending while still
+    /// allowing asynchronous readers to be woken up to read.
+    pub fn try_broadcast(&mut self, val: T) -> Result<(), T> {
+        if let Err(val) = self.inner.try_broadcast(val) {
+            Err(val)
+        } else {
+            self.notify_readers();
+            Ok(())
+        }
+    }
+
     /// Wake all tasks for our readers, and silently drop any
     /// read task handles for which the reader has been dropped.
+    ///
+    /// We do some manual index nonsense because it seems to be
+    /// the easiest way to be able to remove elements that can't
+    /// be upgraded without allocating a new Vec
     fn notify_readers(&mut self) {
         let mut i = 0;
         while i < self.read_tasks.len() {
