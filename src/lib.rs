@@ -161,6 +161,14 @@ impl<T: Clone + Sync> Sink for Bus<T> {
     }
 }
 
+impl<T: Clone + Sync> Drop for Bus<T> {
+    /// Make readers aware of the Bus dropping in
+    /// order to let them terminate their `Stream`.
+    fn drop(&mut self) {
+        self.notify_readers()
+    }
+}
+
 /// The `BusReader` should not be manually crated,
 /// but rather crated by calling `add_rx()` on a `Bus`.
 ///
@@ -209,6 +217,15 @@ impl<T: Clone + Sync> Stream for BusReader<T> {
                 TryRecvError::Empty => Ok(Async::NotReady),
             },
         }
+    }
+}
+
+impl<T: Clone + Sync> Drop for BusReader<T> {
+    /// This reader dropping may allow some
+    /// buffer space to become free, so a
+    /// write may succeed afterward.
+    fn drop(&mut self) {
+        self.write_task.notify();
     }
 }
 
