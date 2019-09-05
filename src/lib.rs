@@ -334,9 +334,25 @@ mod tests {
         // correctly wake up the bus to check for buffer space,
         // and the bus correctly wakes up the receivers to
         // consume from the buffer and make more space availabile
-        rt.spawn(receiver1.take(6).collect().map(|_| {}).map_err(|_| {}));
-        rt.spawn(receiver2.take(6).collect().map(|_| {}).map_err(|_| {}));
-        rt.block_on_all(bus.send_all(iter_ok::<_, ()>(vec![10, 20, 30, 40, 50, 60])))
-            .unwrap();
+        rt.spawn(
+            receiver1
+                .take(6)
+                .collect()
+                .map(|result| assert_eq!(result.len(), 6))
+                .map_err(|_| panic!()),
+        );
+        rt.spawn(
+            receiver2
+                .take(6)
+                .collect()
+                .map(|result| assert_eq!(result.len(), 6))
+                .map_err(|_| panic!()),
+        );
+        rt.block_on_all(
+            bus.send_all(iter_ok::<_, ()>(vec![10, 20, 30, 40, 50, 60]))
+                .map(|_| {})
+                .map_err(|_| panic!()),
+        )
+        .unwrap();
     }
 }
