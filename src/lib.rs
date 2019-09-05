@@ -64,7 +64,7 @@ impl<T: Clone + Sync> Bus<T> {
     ///
     /// Note that until all readers have read a given message
     /// (or the reader has been dropped) it is kept in the
-    /// buffer and counts against the buffer size. 
+    /// buffer and counts against the buffer size.
     pub fn new(len: usize) -> Self {
         let inner = bus::Bus::new(len);
         let read_tasks = Vec::new();
@@ -141,11 +141,6 @@ impl<T: Clone + Sync> Sink for Bus<T> {
         let result = match self.inner.try_broadcast(item) {
             Ok(_) => {
                 self.notify_readers();
-                for weak_task in self.read_tasks.iter() {
-                    if let Some(task) = weak_task.upgrade() {
-                        task.notify();
-                    }
-                }
                 Ok(AsyncSink::Ready)
             }
             Err(item) => Ok(AsyncSink::NotReady(item)),
