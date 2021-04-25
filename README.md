@@ -5,6 +5,10 @@
 
 Integration to let you use [bus](https://crates.io/crates/bus) with [tokio](https://crates.io/crates/tokio).
 
+# Deprecated
+
+The functionality here (forwarding messages such that all consumers receive it) has been put in to tokio itself in the [tokio::sync::broadcast](https://docs.rs/tokio/1.5.0/tokio/sync/broadcast/index.html) module.
+
 # Example
 
 ```rust
